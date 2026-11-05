@@ -13,8 +13,11 @@ import com.google.zxing.*
 import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.atomic.AtomicBoolean
 
-class QrScanner(context: Context, private val onResult: (String) -> Unit, private val onError: (String) -> Unit) : AutoCloseable {
+class QrScanner(context: Context, private val onResult: (String) -> Unit, private val onError: (String) -> Unit,
+    private val onPreview: (PreviewInfo) -> Unit) : AutoCloseable {
+    data class PreviewInfo(val width: Int, val height: Int, val sensorOrientation: Int)
     private val manager = context.getSystemService(CameraManager::class.java)
+    private val mainHandler = Handler(context.mainLooper)
     private val worker = HandlerThread("farview-qr").apply { start() }
     private val handler = Handler(worker.looper)
     private val closed = AtomicBoolean(false)
@@ -29,7 +32,8 @@ class QrScanner(context: Context, private val onResult: (String) -> Unit, privat
         try {
             val id = manager.cameraIdList.firstOrNull { manager.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] == CameraCharacteristics.LENS_FACING_BACK }
                 ?: error("找不到后置相机")
-            val sizes = manager.getCameraCharacteristics(id)[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP]
+            val characteristics = manager.getCameraCharacteristics(id)
+            val sizes = characteristics[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP]
                 ?.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
             val size = sizes.filter { it.width in 640..1280 }.minByOrNull { kotlin.math.abs(it.width - 1280) + kotlin.math.abs(it.height - 720) }
                 ?: sizes.minByOrNull { it.width * it.height } ?: error("相机不支持扫码")
@@ -55,6 +59,8 @@ class QrScanner(context: Context, private val onResult: (String) -> Unit, privat
                 finally { image.close() }
             }, handler)
             texture.setDefaultBufferSize(size.width, size.height)
+            val info = PreviewInfo(size.width, size.height, characteristics[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0)
+            mainHandler.post { if (!closed.get()) onPreview(info) }
             val surface = Surface(texture); preview = surface
             manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {

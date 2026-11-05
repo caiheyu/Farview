@@ -246,9 +246,17 @@ fun FarviewScreen(session: SessionManager, chooseRole: (Role) -> Unit, record: (
         Text("找到另一台手机上的配对页面", color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 12.dp))
         Box(Modifier.padding(top = 30.dp).fillMaxWidth().height(320.dp).clip(RoundedCornerShape(22.dp)).background(Ink), contentAlignment = Alignment.Center) {
             if (life.isAtLeast(Lifecycle.State.RESUMED)) {
-                val scanner = remember { QrScanner(context, { session.scanned(it) }, session::message) }
+                var previewInfo by remember { mutableStateOf<QrScanner.PreviewInfo?>(null) }
+                val scanner = remember { QrScanner(context, { session.scanned(it) }, session::message, { previewInfo = it }) }
                 DisposableEffect(scanner) { onDispose { scanner.close() } }
-                AndroidView(factory = { VideoTexture(it, scanner::start, scanner::close) }, modifier = Modifier.fillMaxSize())
+                AndroidView(factory = { VideoTexture(it, scanner::start, scanner::close).apply { cameraSensorOrientation = 0 } },
+                    update = { view ->
+                        previewInfo?.let { info ->
+                            view.imageWidth = info.width; view.imageHeight = info.height
+                            view.cameraSensorOrientation = info.sensorOrientation
+                        }
+                        view.updateTransform()
+                    }, modifier = Modifier.fillMaxSize())
             }
             Box(Modifier.size(210.dp).border(1.dp, Accent.copy(alpha = .8f), RoundedCornerShape(18.dp)))
             Text("将二维码放入框内 · 自动识别", fontSize = 12.sp, color = Paper, modifier = Modifier.align(Alignment.BottomCenter).padding(20.dp))

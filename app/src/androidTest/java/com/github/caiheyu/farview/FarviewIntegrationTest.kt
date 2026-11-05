@@ -2,11 +2,17 @@ package com.github.caiheyu.farview
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.PowerManager
+import android.view.Surface
+import android.view.View
+import android.view.ViewGroup
 import androidx.activity.compose.setContent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -17,6 +23,7 @@ import com.github.caiheyu.farview.network.Peer
 import com.github.caiheyu.farview.network.SecureTransport
 import com.github.caiheyu.farview.session.*
 import com.github.caiheyu.farview.ui.FarviewScreen
+import com.github.caiheyu.farview.ui.VideoTexture
 import com.github.caiheyu.farview.ui.theme.FarviewTheme
 import org.junit.*
 import org.junit.Assert.*
@@ -36,6 +43,9 @@ class FarviewIntegrationTest {
 
     @Before fun permissions() {
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        for (command in listOf("input keyevent 224", "wm dismiss-keyguard")) {
+            automation.executeShellCommand(command).use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
+        }
         for (permission in listOf("android.permission.CAMERA", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE")) {
             automation.executeShellCommand("pm grant ${app.packageName} $permission").use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
         }
@@ -50,6 +60,41 @@ class FarviewIntegrationTest {
         compose.onNodeWithText("GitHub 开源项目").assertIsDisplayed()
         compose.onNodeWithText("github.com/caiheyu/Farview").assertIsDisplayed()
         screenshot("about")
+    }
+
+    @Test fun scannerCameraPreviewIsUprightAndKeepsItsAspectRatio() {
+        compose.onNodeWithText("作为观看端").performClick()
+        compose.onNodeWithText("对准拍摄端的二维码").assertIsDisplayed()
+        var preview: VideoTexture? = null
+        compose.waitUntil(15000) {
+            var receivedFrame = false
+            compose.runOnUiThread {
+                preview = findVideoTexture(compose.activity.window.decorView)
+                receivedFrame = (preview?.surfaceTexture?.timestamp ?: 0) > 0
+            }
+            receivedFrame
+        }
+        compose.runOnUiThread {
+            val view = preview!!
+            assertEquals(Surface.ROTATION_0, view.display.rotation)
+            val corners = floatArrayOf(0f, 0f, view.width.toFloat(), 0f, 0f, view.height.toFloat())
+            view.getTransform(Matrix()).mapPoints(corners)
+            // In the natural display orientation, the camera producer already
+            // makes the image upright. Its top edge must stay horizontal.
+            assertTrue(corners[2] > corners[0])
+            assertEquals(corners[1], corners[3], .01f)
+            assertEquals(corners[0], corners[4], .01f)
+            assertTrue(corners[5] > corners[1])
+            val cameras = app.getSystemService(CameraManager::class.java)
+            val camera = cameras.cameraIdList.map(cameras::getCameraCharacteristics)
+                .first { it[CameraCharacteristics.LENS_FACING] == CameraCharacteristics.LENS_FACING_BACK }
+            val swapsAxes = (camera[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0) % 180 != 0
+            val expectedAspect = if (swapsAxes) view.imageHeight.toFloat() / view.imageWidth else view.imageWidth.toFloat() / view.imageHeight
+            assertEquals(expectedAspect, (corners[2] - corners[0]) / (corners[5] - corners[1]), .01f)
+        }
+        screenshot("scanner")
+        compose.onNodeWithContentDescription("返回").performClick()
+        compose.onNodeWithText("作为观看端").assertIsDisplayed()
     }
 
     @Test fun encryptedLiveControlRecordingSegmentationAndReconnect() {
@@ -156,6 +201,14 @@ class FarviewIntegrationTest {
         Thread.sleep(250) // Allow the AndroidView and system compositor to present the last UI frame.
         val bitmap = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
         File(directory, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    private fun findVideoTexture(view: View): VideoTexture? {
+        if (view is VideoTexture) return view
+        if (view is ViewGroup) for (index in 0 until view.childCount) {
+            findVideoTexture(view.getChildAt(index))?.let { return it }
+        }
+        return null
     }
 
     private fun assertPlayableSilentVideo(context: Context, uri: Uri) {
