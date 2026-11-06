@@ -270,7 +270,7 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
                 var previewInfo by remember { mutableStateOf<QrScanner.PreviewInfo?>(null) }
                 val scanner = remember { QrScanner(context, { session.scanned(it) }, session::message, { previewInfo = it }) }
                 DisposableEffect(scanner) { onDispose { scanner.close() } }
-                AndroidView(factory = { VideoTexture(it, scanner::start, scanner::close).apply { cameraSensorOrientation = 0 } },
+                AndroidView(factory = { VideoTexture(it, scanner::start, scanner::stop).apply { cameraSensorOrientation = 0 } },
                     update = { view ->
                         previewInfo?.let { info ->
                             view.imageWidth = info.width; view.imageHeight = info.height
@@ -311,7 +311,10 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
                     })
                 }, update = { view ->
                     view.imageWidth = state.videoWidth; view.imageHeight = state.videoHeight
-                    view.imageRotation = (state.rotation + if (viewer) extraRotation else 0) % 360
+                    // Camera2 already delivers upright buffers to TextureView previews; only
+                    // the viewer side needs the stream rotation applied to decoded video.
+                    if (viewer) view.imageRotation = (state.rotation + extraRotation) % 360
+                    else { view.cameraSensorOrientation = state.rotation; view.imageRotation = 0 }
                     view.updateTransform()
                     if (viewer) session.viewerSurface(if (life.isAtLeast(Lifecycle.State.RESUMED)) output else null)
                     else session.cameraPreview(if (life.isAtLeast(Lifecycle.State.RESUMED) && view.isAvailable) view.surfaceTexture else null)
@@ -329,8 +332,8 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
                 }
                 if (!connected || state.videoStalled) Column(Modifier.fillMaxSize().background(Color(0xE61A241E)).padding(30.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     FarIcon(Glyph.WIFI, modifier = Modifier.size(30.dp), tint = Accent)
-                    Text(if (!connected) "连接中断，正在自动重连" else "暂未收到新画面", color = Paper, fontSize = 18.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 18.dp))
-                    Text(if (!connected) "当前画面不可用，远程控制暂不可用\n重连后不会自动继续录像" else "请确认拍摄端相机仍在运行\n必要时唤醒拍摄手机", color = Color(0xFFA3AE99), fontSize = 12.sp, lineHeight = 22.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 10.dp))
+                    Text(if (!connected) (if (viewer) "连接中断，正在自动重连" else "观看端连接已断开") else "暂未收到新画面", color = Paper, fontSize = 18.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 18.dp))
+                    Text(if (!connected) (if (viewer) "当前画面不可用，远程控制暂不可用\n重连后不会自动继续录像" else "拍摄仍在继续，等待观看端重新连接") else "请确认拍摄端相机仍在运行\n必要时唤醒拍摄手机", color = Color(0xFFA3AE99), fontSize = 12.sp, lineHeight = 22.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 10.dp))
                 }
                 if (full) {
                     OutlinedButton(onClick = toggleFull, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 62.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Paper), border = BorderStroke(1.dp, Sage)) {

@@ -9,7 +9,8 @@ data class VideoFormat(val generation: Int, val width: Int, val height: Int, val
     val csd0: ByteArray, val csd1: ByteArray) {
     fun mediaFormat(): MediaFormat = MediaFormat.createVideoFormat("video/avc", width, height).apply {
         setByteBuffer("csd-0", ByteBuffer.wrap(csd0))
-        setByteBuffer("csd-1", ByteBuffer.wrap(csd1))
+        // Some encoders merge SPS and PPS into csd-0 and emit no separate csd-1.
+        if (csd1.isNotEmpty()) setByteBuffer("csd-1", ByteBuffer.wrap(csd1))
     }
     fun encode(): String = JSONObject().put("generation", generation).put("width", width).put("height", height)
         .put("rotation", rotation).put("csd0", Base64.encodeToString(csd0, Base64.NO_WRAP))
@@ -20,7 +21,7 @@ data class VideoFormat(val generation: Int, val width: Int, val height: Int, val
             val result = VideoFormat(j.getInt("generation"), j.getInt("width"), j.getInt("height"), j.getInt("rotation"),
                 Base64.decode(j.getString("csd0"), Base64.NO_WRAP), Base64.decode(j.getString("csd1"), Base64.NO_WRAP))
             require(result.width in 16..3840 && result.height in 16..3840 && result.rotation in listOf(0, 90, 180, 270)
-                && result.csd0.size in 1..4096 && result.csd1.size in 1..4096) { "视频格式无效" }
+                && result.csd0.size in 1..4096 && result.csd1.size in 0..4096) { "视频格式无效" }
             return result
         }
         fun from(generation: Int, format: MediaFormat, rotation: Int): VideoFormat {

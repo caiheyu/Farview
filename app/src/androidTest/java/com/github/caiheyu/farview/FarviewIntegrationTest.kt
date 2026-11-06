@@ -153,6 +153,19 @@ class FarviewIntegrationTest {
         }
         assertEquals(Stage.CONNECTED, sender.state.value.stage)
         Thread.sleep(1500)
+        // The sender's own preview must stay upright like the scanner preview: camera2
+        // already rotates TextureView buffers, so the stream rotation applies to the viewer only.
+        var senderPreview: VideoTexture? = null
+        compose.waitUntil(10000) {
+            compose.runOnUiThread { senderPreview = findVideoTexture(compose.activity.window.decorView) }
+            senderPreview != null
+        }
+        compose.runOnUiThread {
+            val corners = floatArrayOf(0f, 0f, senderPreview!!.width.toFloat(), 0f, 0f, senderPreview!!.height.toFloat())
+            senderPreview!!.getTransform(Matrix()).mapPoints(corners)
+            assertTrue(corners[2] > corners[0])
+            assertEquals(corners[1], corners[3], .01f)
+        }
         screenshot("camera")
 
         compose.runOnUiThread { compose.activity.setContent { FarviewTheme { FarviewScreen(receiver, {}, receiver::toggleRecording) } } }

@@ -99,7 +99,9 @@ class Peer(
     }
 
     fun send(packet: Packet) {
-        if (open.get() && !messages.offer(packet)) finish(IllegalStateException("控制通道拥塞"))
+        // Overflow closing runs on a dedicated thread: callers may be on the main thread and
+        // finish() invokes the close callback, which can perform file I/O (recorder stop).
+        if (open.get() && !messages.offer(packet)) thread(name = "farview-close") { finish(IllegalStateException("控制通道拥塞")) }
     }
 
     @Synchronized fun video(frame: EncodedFrame) {

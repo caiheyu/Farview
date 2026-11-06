@@ -29,6 +29,7 @@ class QrScanner(context: Context, private val onResult: (String) -> Unit, privat
     @SuppressLint("MissingPermission")
     fun start(texture: SurfaceTexture) = handler.post {
         if (closed.get()) return@post
+        release()
         try {
             val id = manager.cameraIdList.firstOrNull { manager.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] == CameraCharacteristics.LENS_FACING_BACK }
                 ?: error("找不到后置相机")
@@ -87,11 +88,16 @@ class QrScanner(context: Context, private val onResult: (String) -> Unit, privat
             }, handler)
         } catch (e: Exception) { if (!closed.get()) onError("无法打开扫码相机：${e.message}") }
     }
+    /** Release the camera but stay reusable: a TextureView surface can be destroyed and recreated. */
+    fun stop() = handler.post { release() }
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        handler.post {
-            runCatching { session?.close() }; runCatching { camera?.close() }
-            reader?.close(); preview?.release(); worker.quitSafely()
-        }
+        handler.post { release(); worker.quitSafely() }
+    }
+    private fun release() {
+        runCatching { session?.close() }; session = null
+        runCatching { camera?.close() }; camera = null
+        reader?.close(); reader = null
+        preview?.release(); preview = null
     }
 }

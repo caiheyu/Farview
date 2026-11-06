@@ -218,7 +218,7 @@ class SessionManager(private val context: Context) {
                             if (id != run.get()) { socket.close(); break }
                             connectionNote(status = "已建立加密连接，等待拍摄端确认", detail = "${path.host} / ${path.label} / ${socket.session.protocol} 握手成功")
                             installPeer(socket, id, Role.VIEWER)
-                            connected = true; break
+                            connected = true; attempt = 0; break
                         } catch (e: CancellationException) { runCatching { socket?.close() }; throw e }
                         catch (e: Exception) {
                             runCatching { socket?.close() }
@@ -243,7 +243,8 @@ class SessionManager(private val context: Context) {
             onClosed = { error -> if (run.get() == id && peer === current && !state.value.ending) {
                 if (error != null) android.util.Log.w("Farview", "Local session interrupted", error)
                 peer = null; commands.clear()
-                connectionNote(issue = "对方连接已中断，正在自动重连", detail = "连接断开：${error?.javaClass?.simpleName ?: "连接关闭"} ${error?.message?.take(160).orEmpty()}")
+                connectionNote(issue = if (role == Role.CAMERA) "观看端连接已中断，等待其重新连接" else "对方连接已中断，正在自动重连",
+                    detail = "连接断开：${error?.javaClass?.simpleName ?: "连接关闭"} ${error?.message?.take(160).orEmpty()}")
                 recorder.stop("连接中断，当前录像已结束；重连后不会自动续录")
                 decoder.clear()
                 mutableState.update { it.copy(stage = Stage.RECONNECTING, videoStalled = true, pendingCommand = false, recording = false) }
@@ -260,33 +261,40 @@ class SessionManager(private val context: Context) {
     private fun receive(packet: Packet, role: Role) {
         when (packet.type) {
             Packet.PING -> peer?.send(Packet(Packet.PONG, packet.bytes))
-            Packet.PONG -> lastRtt = (SystemClock.elapsedRealtime() - packet.text().toLong()).coerceIn(0, 60000)
+            Packet.PONG -> packet.text().toLongOrNull()?.let { lastRtt = (SystemClock.elapsedRealtime() - it).coerceIn(0, 60000) }
             Packet.END -> { message("对方已结束连接"); end(notifyPeer = false) }
             Packet.ERROR -> { fail(packet.text().take(200)) }
+            // A packet this build cannot parse must not kill the link: mixed app versions
+            // and device encoder quirks surface here first, and controls should keep working.
             Packet.STATE -> if (role == Role.VIEWER) {
-                val j = JSONObject(packet.text())
-                val list = j.getJSONArray("lenses")
-                require(list.length() in 1..32)
-                val lenses = (0 until list.length()).map { Lens.parse(list.getJSONObject(it)) }
-                require(lenses.all { it.zoomMin.isFinite() && it.zoomMax.isFinite() && it.zoomMin > 0 && it.zoomMax <= 200 && it.zoomMin <= it.zoomMax })
-                val ack = j.optInt("ack")
-                commands.remove(ack)
-                val error = j.optString("error")
-                if (error.isNotBlank()) message(error)
-                mutableState.update { it.copy(role = Role.VIEWER, stage = Stage.CONNECTED, lenses = lenses,
-                    lensId = j.getString("lens"), zoom = j.getDouble("zoom").toFloat(), torch = j.getBoolean("torch"),
-                    quality = j.getInt("quality"), qualityMode = j.getString("mode"),
-                    connectionStatus = "已连接", connectionIssue = null,
-                    pendingCommand = commands.isNotEmpty(), connectedAt = if (it.connectedAt == 0L) System.currentTimeMillis() else it.connectedAt) }
+                try {
+                    val j = JSONObject(packet.text())
+                    val list = j.getJSONArray("lenses")
+                    require(list.length() in 1..32)
+                    val lenses = (0 until list.length()).map { Lens.parse(list.getJSONObject(it)) }
+                    require(lenses.all { it.zoomMin.isFinite() && it.zoomMax.isFinite() && it.zoomMin > 0 && it.zoomMax <= 200 && it.zoomMin <= it.zoomMax })
+                    val ack = j.optInt("ack")
+                    commands.remove(ack)
+                    val error = j.optString("error")
+                    if (error.isNotBlank()) message(error)
+                    mutableState.update { it.copy(role = Role.VIEWER, stage = Stage.CONNECTED, lenses = lenses,
+                        lensId = j.getString("lens"), zoom = j.getDouble("zoom").toFloat(), torch = j.getBoolean("torch"),
+                        quality = j.getInt("quality"), qualityMode = j.getString("mode"),
+                        connectionStatus = "已连接", connectionIssue = null,
+                        pendingCommand = commands.isNotEmpty(), connectedAt = if (it.connectedAt == 0L) System.currentTimeMillis() else it.connectedAt) }
+                } catch (e: Exception) { message("无法读取拍摄端状态，请确认两端安装了相同版本的遥映") }
             }
             Packet.COMMAND -> if (role == Role.CAMERA) executeCommand(JSONObject(packet.text()))
             Packet.FORMAT -> if (role == Role.VIEWER) {
-                val f = VideoFormat.decode(packet.text()); format = f
-                recorder.format(f); decoder.configure(f)
-                mutableState.update { it.copy(videoWidth = f.width, videoHeight = f.height, rotation = f.rotation) }
+                try {
+                    val f = VideoFormat.decode(packet.text()); format = f
+                    recorder.format(f); decoder.configure(f)
+                    mutableState.update { it.copy(videoWidth = f.width, videoHeight = f.height, rotation = f.rotation) }
+                } catch (e: Exception) { message("无法识别拍摄端的视频格式，请确认两端安装了相同版本的遥映") }
             }
             Packet.FRAME -> if (role == Role.VIEWER) {
-                val frame = EncodedFrame.parse(packet)
+                val frame = runCatching { EncodedFrame.parse(packet) }.getOrElse {
+                    message("无法解析视频帧，请确认两端安装了相同版本的遥映"); return }
                 if (frame.generation == format?.generation) {
                     lastFrameAt = System.currentTimeMillis()
                     recorder.frame(frame); decoder.frame(frame)
@@ -400,7 +408,9 @@ class SessionManager(private val context: Context) {
         if (state.value.ending) return
         mutableState.update { it.copy(ending = true) }
         scope.launch { mutex.withLock {
-            if (notifyPeer) { peer?.send(Packet.text(Packet.END, "ended")); delay(150) }
+            // Drop queued frames so END is the next packet written instead of waiting
+            // behind a congested frame backlog that may never drain in 150 ms.
+            if (notifyPeer) { peer?.let { it.resetVideo(); it.send(Packet.text(Packet.END, "ended")) }; delay(150) }
             cleanup()
             mutableState.update { SessionState(savedClips = it.savedClips, lastClip = it.lastClip, pendingRecordings = recorder.pendingCount()) }
             stopService()

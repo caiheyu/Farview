@@ -2,9 +2,10 @@ package com.github.caiheyu.farview.session
 
 /** Hysteresis: start at 720p; upgrade only after sustained headroom. */
 class QualityPolicy {
-    private var stableSince = 0L
-    private var congestedAt = 0L
-    private var changedAt = 0L
+    // Congestion arrives on the peer write thread while tick() reads these on IO.
+    @Volatile private var stableSince = 0L
+    @Volatile private var congestedAt = 0L
+    @Volatile private var changedAt = 0L
     fun reset(now: Long) { stableSince = now; congestedAt = 0; changedAt = now }
     fun congestion(now: Long) { congestedAt = now; stableSince = now }
     fun target(now: Long, actual: Int, rtt: Long, available1080: Boolean): Int {
