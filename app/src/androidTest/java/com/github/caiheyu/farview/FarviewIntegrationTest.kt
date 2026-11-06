@@ -3,6 +3,7 @@ package com.github.caiheyu.farview
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
@@ -11,6 +12,7 @@ import android.media.MediaFormat
 import android.net.Uri
 import android.os.PowerManager
 import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.compose.setContent
@@ -21,6 +23,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.github.caiheyu.farview.network.Pairing
 import com.github.caiheyu.farview.network.Peer
 import com.github.caiheyu.farview.network.SecureTransport
+import com.github.caiheyu.farview.network.LocalNetwork
 import com.github.caiheyu.farview.session.*
 import com.github.caiheyu.farview.ui.FarviewScreen
 import com.github.caiheyu.farview.ui.VideoTexture
@@ -29,6 +32,7 @@ import org.junit.*
 import org.junit.Assert.*
 import org.junit.runner.RunWith
 import java.io.File
+import java.net.ServerSocket
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -66,11 +70,27 @@ class FarviewIntegrationTest {
         compose.onNodeWithText("作为观看端").performClick()
         compose.onNodeWithText("对准拍摄端的二维码").assertIsDisplayed()
         var preview: VideoTexture? = null
+        var observed: VideoTexture? = null
+        var frameUpdates = 0
         compose.waitUntil(15000) {
             var receivedFrame = false
             compose.runOnUiThread {
                 preview = findVideoTexture(compose.activity.window.decorView)
-                receivedFrame = (preview?.surfaceTexture?.timestamp ?: 0) > 0
+                preview?.let { view ->
+                    if (observed !== view) {
+                        val original = view.surfaceTextureListener!!
+                        view.surfaceTextureListener = object : TextureView.SurfaceTextureListener by original {
+                            override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+                                frameUpdates++
+                                original.onSurfaceTextureUpdated(texture)
+                            }
+                        }
+                        observed = view
+                    }
+                    // Observe presented frames directly; legacy camera HAL timestamps
+                    // can be zero or negative while the preview is visibly rendering.
+                    receivedFrame = frameUpdates >= 2
+                }
             }
             receivedFrame
         }
@@ -95,6 +115,26 @@ class FarviewIntegrationTest {
         screenshot("scanner")
         compose.onNodeWithContentDescription("返回").performClick()
         compose.onNodeWithText("作为观看端").assertIsDisplayed()
+    }
+
+    @Test fun connectionFailureShowsTheActualReasonAndSafeDiagnostics() {
+        compose.onNodeWithText("作为观看端").performClick()
+        val hosts = LocalNetwork(app).advertisedHosts()
+        val unusedPort = ServerSocket(0).use { it.localPort }
+        val pairing = Pairing(hosts, unusedPort, "a".repeat(64), "b".repeat(64))
+        assertTrue(sender.scanned(pairing.encode()))
+        compose.waitUntil(12000) { sender.state.value.connectionIssue != null }
+        compose.onNodeWithText("复制连接诊断").assertIsDisplayed()
+        compose.onNodeWithText("拍摄端未接受连接", substring = true).assertIsDisplayed()
+        val report = sender.connectionDiagnostics()
+        assertTrue(report.contains(hosts.first()))
+        assertTrue(report.contains(unusedPort.toString()))
+        assertTrue(report.contains("Android"))
+        assertFalse(report.contains(pairing.token))
+        assertFalse(report.contains(pairing.fingerprint))
+        screenshot("connection-failure")
+        sender.end()
+        compose.waitUntil(5000) { sender.state.value.stage == Stage.HOME }
     }
 
     @Test fun encryptedLiveControlRecordingSegmentationAndReconnect() {

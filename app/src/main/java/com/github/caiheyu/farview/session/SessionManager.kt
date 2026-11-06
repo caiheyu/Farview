@@ -18,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -27,6 +28,7 @@ import javax.net.ssl.SSLSocket
 class SessionManager(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val localNetwork = LocalNetwork(context)
     private val mutableState = MutableStateFlow(SessionState())
     val state: StateFlow<SessionState> = mutableState.asStateFlow()
     private val mutableEvents = MutableSharedFlow<String>(extraBufferCapacity = 20)
@@ -36,6 +38,7 @@ class SessionManager(private val context: Context) {
     @Volatile private var server: SSLServerSocket? = null
     @Volatile private var format: VideoFormat? = null
     @Volatile private var clientJob: Job? = null
+    @Volatile private var connectingSocket: Socket? = null
     private var serverJob: Job? = null
     private var run = AtomicInteger(0)
     @Volatile private var token: String? = null
@@ -69,6 +72,22 @@ class SessionManager(private val context: Context) {
     fun message(text: String) { android.util.Log.i("FarviewEvent", text); mutableEvents.tryEmit(text) }
     fun dismissError() { mutableState.update { it.copy(error = null) } }
 
+    private fun connectionNote(status: String? = null, issue: String? = null, detail: String? = null) {
+        val line = detail?.let { "${android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis())} $it" }
+        mutableState.update { it.copy(connectionStatus = status ?: it.connectionStatus,
+            connectionIssue = issue ?: it.connectionIssue,
+            connectionLog = if (line == null) it.connectionLog else (it.connectionLog + line).takeLast(10)) }
+    }
+
+    fun connectionDiagnostics(): String {
+        val s = state.value
+        return "遥映 ${com.github.caiheyu.farview.BuildConfig.VERSION_NAME}\n" +
+            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / Android ${android.os.Build.VERSION.RELEASE}\n" +
+            "角色：${s.role} / 状态：${s.stage}\n${localNetwork.summary()}\n" +
+            "拍摄端地址：${s.pairing?.let { "${it.hosts.joinToString()} : ${it.port}" } ?: "未配对"}\n" +
+            "当前步骤：${s.connectionStatus}\n最近错误：${s.connectionIssue ?: "无"}\n" + s.connectionLog.joinToString("\n")
+    }
+
     fun chooseCamera() {
         if (state.value.hasSession) return
         mutableState.update { it.copy(role = Role.CAMERA, stage = Stage.PREPARING, error = null) }
@@ -101,11 +120,13 @@ class SessionManager(private val context: Context) {
     private fun prepareCamera() {
         val id = run.incrementAndGet()
         try {
-            mutableState.update { it.copy(role = Role.CAMERA, stage = Stage.PREPARING, pairing = null, error = null) }
-            val hosts = Pairing.localAddresses()
+            mutableState.update { it.copy(role = Role.CAMERA, stage = Stage.PREPARING, pairing = null, error = null,
+                connectionIssue = null) }
+            val hosts = localNetwork.advertisedHosts()
             check(hosts.isNotEmpty()) { "未找到热点或局域网地址。请先开启热点，或连接另一台手机的热点后重试。" }
             val tls = SecureTransport()
             val socket = tls.server(); server = socket
+            connectionNote(status = "等待观看端连接", detail = "IPv4 监听端口 ${socket.localPort}；地址 ${hosts.joinToString()}")
             val secret = Pairing.newToken(); token = secret
             val engine = CameraEngine(context,
                 onFormat = { f -> if (id == run.get()) {
@@ -134,6 +155,7 @@ class SessionManager(private val context: Context) {
         while (id == run.get() && !socket.isClosed) {
             val client = try { socket.accept() as SSLSocket } catch (_: Exception) { break }
             try {
+                if (id == run.get()) connectionNote(detail = "收到 ${client.inetAddress?.hostAddress} 的 TCP 连接，开始加密握手")
                 client.soTimeout = 5000
                 client.startHandshake()
                 val hello = Packet.read(DataInputStream(client.inputStream))
@@ -141,15 +163,23 @@ class SessionManager(private val context: Context) {
                 val valid = hello.type == Packet.HELLO && j.optInt("v") == 1 && MessageDigest.isEqual(
                     j.optString("token").toByteArray(), secret.toByteArray())
                 if (!valid || peer != null || id != run.get()) {
-                    Packet.write(DataOutputStream(client.outputStream), Packet.text(Packet.ERROR, if (!valid) "配对码已失效，请重新扫码" else "拍摄端已有观看连接"))
+                    val reason = if (!valid) "配对码已失效，请重新扫码" else "拍摄端已有观看连接"
+                    if (id == run.get()) connectionNote(issue = reason, detail = "拒绝观看连接：$reason")
+                    Packet.write(DataOutputStream(client.outputStream), Packet.text(Packet.ERROR, reason))
                     client.close(); continue
                 }
+                connectionNote(detail = "观看端配对验证通过 / ${client.session.protocol}")
                 installPeer(client, id, Role.CAMERA)
                 qualityPolicy.reset(SystemClock.elapsedRealtime())
                 publishCameraState()
                 format?.let { peer?.send(Packet.text(Packet.FORMAT, it.encode())) }
                 camera?.keyframe()
-            } catch (e: Exception) { android.util.Log.w("Farview", "Incoming TLS session failed", e); runCatching { client.close() } }
+            } catch (e: Exception) {
+                android.util.Log.w("Farview", "Incoming TLS session failed", e)
+                if (id == run.get() && !state.value.ending) connectionNote(issue = "观看端已到达，但加密握手或配对验证未完成，请查看连接诊断",
+                    detail = "收到 ${client.inetAddress?.hostAddress} 的连接，但握手或认证未完成：${connectionFailureDetail(e)}")
+                runCatching { client.close() }
+            }
         }
     }
 
@@ -158,24 +188,48 @@ class SessionManager(private val context: Context) {
         clientJob = scope.launch {
             val pairing = try { Pairing.parse(text) } catch (e: Exception) { fail(e.message ?: "无效的配对码"); return@launch }
             val id = run.incrementAndGet()
+            mutableState.update { it.copy(role = Role.VIEWER, pairing = pairing) }
             var attempt = 0
             while (isActive && run.get() == id) {
                 if (peer == null) {
                     attempt++
                     mutableState.update { it.copy(stage = if (it.connectedAt == 0L) Stage.CONNECTING else Stage.RECONNECTING, reconnectAttempt = attempt, pendingCommand = false) }
                     var connected = false
-                    for (host in pairing.hosts) {
+                    val paths = runCatching { localNetwork.paths(pairing.hosts) }.getOrElse { error ->
+                        connectionNote(issue = "无法读取局域网路由，正在尝试直连", detail = "网络查询失败：${error.javaClass.simpleName}")
+                        pairing.hosts.map { LocalNetwork.Path(it, "系统直连") }
+                    }
+                    for (path in paths) {
+                        ensureActive()
                         if (id != run.get()) break
                         var socket: SSLSocket? = null
+                        var pending: Socket? = null
                         try {
-                            socket = SecureTransport.connect(pairing, host)
+                            socket = SecureTransport.connect(pairing, path.host, openSocket = {
+                                path.openSocket().also { raw ->
+                                    pending = raw; connectingSocket = raw
+                                    if (id != run.get() || !isActive) { raw.close(); throw CancellationException() }
+                                }
+                            }, onStep = { step ->
+                                if (id == run.get() && !state.value.ending) connectionNote(
+                                    status = "${step.label}：${path.host}:${pairing.port}（${path.label}）")
+                            })
                             Packet.write(DataOutputStream(socket.outputStream), Packet.text(Packet.HELLO, JSONObject().put("v", 1).put("token", pairing.token).toString()))
                             if (id != run.get()) { socket.close(); break }
+                            connectionNote(status = "已建立加密连接，等待拍摄端确认", detail = "${path.host} / ${path.label} / ${socket.session.protocol} 握手成功")
                             installPeer(socket, id, Role.VIEWER)
                             connected = true; break
-                        } catch (e: Exception) { android.util.Log.w("Farview", "Local connection failed", e); runCatching { socket?.close() } }
+                        } catch (e: CancellationException) { runCatching { socket?.close() }; throw e }
+                        catch (e: Exception) {
+                            runCatching { socket?.close() }
+                            ensureActive()
+                            if (id != run.get()) break
+                            android.util.Log.w("Farview", "Local connection failed on ${path.label}", e)
+                            connectionNote(issue = connectionFailure(e), detail = "${path.host}:${pairing.port} / ${path.label} / " +
+                                "${(e as? LocalConnectException)?.step ?: "认证"} / ${connectionFailureDetail(e)}")
+                        } finally { if (connectingSocket === pending) connectingSocket = null }
                     }
-                    if (!connected && attempt == 3 && isActive && run.get() == id && !state.value.ending) message("尚未连通，请确认两台手机在同一热点，且热点允许设备互访。仍在重试。")
+                    if (!connected && attempt == 3 && isActive && run.get() == id && !state.value.ending) message("仍未连通，可点击「复制连接诊断」查看具体原因；正在继续重试。")
                 }
                 delay(if (peer == null) (attempt * 700L).coerceAtMost(5000) else 500)
             }
@@ -189,6 +243,7 @@ class SessionManager(private val context: Context) {
             onClosed = { error -> if (run.get() == id && peer === current && !state.value.ending) {
                 if (error != null) android.util.Log.w("Farview", "Local session interrupted", error)
                 peer = null; commands.clear()
+                connectionNote(issue = "对方连接已中断，正在自动重连", detail = "连接断开：${error?.javaClass?.simpleName ?: "连接关闭"} ${error?.message?.take(160).orEmpty()}")
                 recorder.stop("连接中断，当前录像已结束；重连后不会自动续录")
                 decoder.clear()
                 mutableState.update { it.copy(stage = Stage.RECONNECTING, videoStalled = true, pendingCommand = false, recording = false) }
@@ -197,7 +252,8 @@ class SessionManager(private val context: Context) {
             onCongestion = { congestedAt = System.currentTimeMillis(); qualityPolicy.congestion(SystemClock.elapsedRealtime()) })
         peer = current
         lastFrameAt = 0; lastRtt = 0
-        if (role == Role.CAMERA) mutableState.update { it.copy(stage = Stage.CONNECTED, connectedAt = System.currentTimeMillis(), videoStalled = false) }
+        if (role == Role.CAMERA) mutableState.update { it.copy(stage = Stage.CONNECTED, connectedAt = System.currentTimeMillis(), videoStalled = false,
+            connectionStatus = "已连接", connectionIssue = null) }
         current.start()
     }
 
@@ -220,6 +276,7 @@ class SessionManager(private val context: Context) {
                 mutableState.update { it.copy(role = Role.VIEWER, stage = Stage.CONNECTED, lenses = lenses,
                     lensId = j.getString("lens"), zoom = j.getDouble("zoom").toFloat(), torch = j.getBoolean("torch"),
                     quality = j.getInt("quality"), qualityMode = j.getString("mode"),
+                    connectionStatus = "已连接", connectionIssue = null,
                     pendingCommand = commands.isNotEmpty(), connectedAt = if (it.connectedAt == 0L) System.currentTimeMillis() else it.connectedAt) }
             }
             Packet.COMMAND -> if (role == Role.CAMERA) executeCommand(JSONObject(packet.text()))
@@ -361,6 +418,7 @@ class SessionManager(private val context: Context) {
         serverJob?.cancel(); serverJob = null
         runCatching { server?.close() }; server = null
         clientJob?.cancel(); clientJob = null
+        runCatching { connectingSocket?.close() }; connectingSocket = null
         val previous = peer; peer = null; previous?.close()
         recorder.stop()
         recorder.awaitSaves(); recorder.clearFormat()

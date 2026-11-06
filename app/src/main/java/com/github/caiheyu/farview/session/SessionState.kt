@@ -15,7 +15,8 @@ data class SessionState(
     val recordingAt: Long = 0, val savedClips: Int = 0, val lastClip: Uri? = null,
     val pendingCommand: Boolean = false, val videoStalled: Boolean = true, val weakNetwork: Boolean = false,
     val error: String? = null, val reconnectAttempt: Int = 0, val ending: Boolean = false,
-    val pendingRecordings: Int = 0, val saving: Boolean = false
+    val pendingRecordings: Int = 0, val saving: Boolean = false,
+    val connectionStatus: String = "", val connectionIssue: String? = null, val connectionLog: List<String> = emptyList()
 ) {
     val lens get() = lenses.find { it.id == lensId }
     val hasSession get() = stage !in listOf(Stage.HOME, Stage.SCAN)

@@ -2,8 +2,6 @@ package com.github.caiheyu.farview.network
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.security.SecureRandom
 
 data class Pairing(val hosts: List<String>, val port: Int, val token: String, val fingerprint: String) {
@@ -35,12 +33,6 @@ data class Pairing(val hosts: List<String>, val port: Int, val token: String, va
             if (p.any { it !in 0..255 } || p[3] == 0 || p[3] == 255) return false
             return p[0] == 10 || (p[0] == 172 && p[1] in 16..31) || (p[0] == 192 && p[1] == 168)
         }
-
-        fun localAddresses(): List<String> = NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.toList() }
-            .filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }
-            .filter(::isLocalIpv4).distinct().take(8)
 
         fun newToken(): String = ByteArray(32).also { SecureRandom().nextBytes(it) }.toHex()
     }

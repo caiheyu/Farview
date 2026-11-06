@@ -1,6 +1,9 @@
 package com.github.caiheyu.farview.ui
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
@@ -99,11 +102,13 @@ fun FarviewScreen(session: SessionManager, chooseRole: (Role) -> Unit, record: (
                     }
                     Stage.WAITING -> {
                         AppHeader("等待观看端", "本地配对", back = { endConfirm = true }, about = { panel = "about" })
-                        PairScreen(state, session::refreshPairing)
+                        PairScreen(state, session::refreshPairing) { copyConnectionDiagnostics(context, session) }
                     }
                     Stage.CONNECTING -> {
                         AppHeader("正在连接", "仅本地", back = { endConfirm = true }, about = { panel = "about" })
-                        CenterStatus("正在建立本地连接", "请保持拍摄端运行，并确认两台手机连接同一热点\n第 ${state.reconnectAttempt.coerceAtLeast(1)} 次尝试")
+                        CenterStatus("正在建立本地连接", "请保持拍摄端配对页打开\n第 ${state.reconnectAttempt.coerceAtLeast(1)} 次尝试") {
+                            ConnectionDetails(state) { copyConnectionDiagnostics(context, session) }
+                        }
                     }
                     Stage.CONNECTED, Stage.RECONNECTING -> {
                         LiveScreen(state, session, full, rotation, { full = !full }, { rotation = (rotation + 90) % 360 },
@@ -205,15 +210,16 @@ fun FarviewScreen(session: SessionManager, chooseRole: (Role) -> Unit, record: (
     HorizontalDivider(color = Color(0xFFE3E9DA), thickness = .5.dp)
 }
 
-@Composable private fun ColumnScope.CenterStatus(title: String, subtitle: String) {
+@Composable private fun ColumnScope.CenterStatus(title: String, subtitle: String, extra: @Composable ColumnScope.() -> Unit = {}) {
     Column(Modifier.fillMaxWidth().weight(1f).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         CircularProgressIndicator(Modifier.size(32.dp), color = Sage, strokeWidth = 2.dp)
         Text(title, fontSize = 21.sp, modifier = Modifier.padding(top = 26.dp))
         Text(subtitle, color = Muted, fontSize = 13.sp, lineHeight = 23.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 12.dp))
+        extra()
     }
 }
 
-@Composable private fun ColumnScope.PairScreen(state: SessionState, refresh: () -> Unit) {
+@Composable private fun ColumnScope.PairScreen(state: SessionState, refresh: () -> Unit, diagnostics: () -> Unit) {
     val text = state.pairing?.encode()
     val bitmap = remember(text) { text?.let {
         val bits = QRCodeWriter().encode(it, BarcodeFormat.QR_CODE, 640, 640, mapOf(EncodeHintType.MARGIN to 2))
@@ -231,9 +237,24 @@ fun FarviewScreen(session: SessionManager, chooseRole: (Role) -> Unit, record: (
         Text("临时会话 · ${state.pairing?.token?.take(6)?.uppercase() ?: "准备中"}", color = Muted, fontSize = 11.sp, letterSpacing = 1.sp, modifier = Modifier.padding(top = 17.dp))
         TextButton(onClick = refresh) { FarIcon(Glyph.REFRESH, modifier = Modifier.size(15.dp)); Spacer(Modifier.width(8.dp)); Text("刷新二维码", fontSize = 12.sp) }
         Text("每次重新配对 · 不记住设备", color = Muted, fontSize = 11.sp)
+        ConnectionDetails(state, diagnostics)
         Spacer(Modifier.weight(1f).heightIn(min = 30.dp))
         Hint("画面只在两台手机之间传送", "请确认两台手机在同一热点；刷新后旧码失效。", Glyph.SHIELD)
     }
+}
+
+@Composable private fun ConnectionDetails(state: SessionState, copy: () -> Unit) {
+    if (state.connectionStatus.isNotBlank()) Text(state.connectionStatus, color = Muted, fontSize = 11.sp,
+        lineHeight = 19.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 18.dp))
+    state.connectionIssue?.let { Text(it, color = Sage, fontSize = 12.sp, lineHeight = 21.sp,
+        textAlign = TextAlign.Center, modifier = Modifier.padding(top = 12.dp)) }
+    TextButton(onClick = copy) { Text("复制连接诊断", fontSize = 12.sp) }
+}
+
+private fun copyConnectionDiagnostics(context: Context, session: SessionManager) {
+    context.getSystemService(ClipboardManager::class.java)
+        .setPrimaryClip(ClipData.newPlainText("遥映连接诊断", session.connectionDiagnostics()))
+    session.message("连接诊断已复制")
 }
 
 @Composable private fun ColumnScope.ScannerScreen(session: SessionManager) {
@@ -445,6 +466,9 @@ private fun duration(milliseconds: Long): String { val total = (milliseconds.coe
     HorizontalDivider(color = Soft)
     AboutRow(Glyph.REFRESH, "检查更新", "手动检查 GitHub Release") { updates.check() }
     HorizontalDivider(color = Soft)
+    if (state.hasSession || state.connectionLog.isNotEmpty()) AboutRow(Glyph.WIFI, "连接诊断", "复制本机网络与最近连接结果") {
+        copyConnectionDiagnostics(context, session)
+    }
     if (state.pendingRecordings > 0) AboutRow(Glyph.GALLERY, "恢复未保存的录像", "${state.pendingRecordings} 个文件保留在本机，点击重试") { session.recoverRecordings() }
     if (update.phase != UpdatePhase.IDLE) {
         Spacer(Modifier.height(14.dp))

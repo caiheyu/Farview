@@ -4,11 +4,13 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.math.BigInteger
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.security.cert.CertificateException
 import java.util.Date
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
@@ -45,32 +47,45 @@ class SecureTransport {
     fun server(): SSLServerSocket {
         val managers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(store, null) }
         val context = SSLContext.getInstance("TLS").apply { init(managers.keyManagers, null, SecureRandom()) }
-        return (context.serverSocketFactory.createServerSocket(0) as SSLServerSocket).apply {
+        return (context.serverSocketFactory.createServerSocket() as SSLServerSocket).apply {
             enabledProtocols = supportedProtocols.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
+            bind(InetSocketAddress("0.0.0.0", 0))
         }
     }
 
     companion object {
         private const val ALIAS = "farview-local-tls-v2"
-        fun connect(pairing: Pairing, host: String): SSLSocket {
+        fun connect(pairing: Pairing, host: String, openSocket: () -> Socket = { Socket() },
+            onStep: (ConnectStep) -> Unit = {}): SSLSocket {
             val trust = object : X509TrustManager {
                 override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
                 override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = error("不接受客户端证书")
                 override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                    require(!chain.isNullOrEmpty()) { "拍摄端证书缺失" }
+                    if (chain.isNullOrEmpty()) throw CertificateException("拍摄端证书缺失")
                     val actual = MessageDigest.getInstance("SHA-256").digest(chain[0].encoded).toHex()
-                    require(MessageDigest.isEqual(actual.toByteArray(), pairing.fingerprint.toByteArray())) { "配对证书不匹配，请重新扫码" }
+                    if (!MessageDigest.isEqual(actual.toByteArray(), pairing.fingerprint.toByteArray()))
+                        throw CertificateException("配对证书不匹配，请重新扫码")
                 }
             }
             val context = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(trust), SecureRandom()) }
-            val socket = context.socketFactory.createSocket() as SSLSocket
+            var raw: Socket? = null
+            var socket: SSLSocket? = null
+            var step = ConnectStep.NETWORK
             try {
+                onStep(step)
+                raw = openSocket()
+                raw.connect(InetSocketAddress(host, pairing.port), 2500)
+                step = ConnectStep.TLS; onStep(step)
+                socket = context.socketFactory.createSocket(raw, host, pairing.port, true) as SSLSocket
                 socket.enabledProtocols = socket.supportedProtocols.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
-                socket.connect(InetSocketAddress(host, pairing.port), 2500)
                 socket.soTimeout = 5000
                 socket.startHandshake()
                 return socket
-            } catch (e: Exception) { socket.close(); throw e }
+            } catch (e: Exception) {
+                runCatching { socket?.close() }; runCatching { raw?.close() }
+                if (e is java.util.concurrent.CancellationException) throw e
+                throw LocalConnectException(step, e)
+            }
         }
     }
 }
