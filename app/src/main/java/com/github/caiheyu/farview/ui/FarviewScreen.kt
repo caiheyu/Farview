@@ -311,9 +311,11 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
                     })
                 }, update = { view ->
                     view.imageWidth = state.videoWidth; view.imageHeight = state.videoHeight
-                    // Camera2 already delivers upright buffers to TextureView previews; only
-                    // the viewer side needs the stream rotation applied to decoded video.
-                    if (viewer) view.imageRotation = (state.rotation + extraRotation) % 360
+                    // The camera service bakes the sensor rotation into the SurfaceTexture
+                    // transform, and EncoderBridge applies that matrix, so the encoded stream
+                    // is already upright: never rotate it again on display (only the manual
+                    // 旋转 button may). Camera2 does the same for this side's own preview.
+                    if (viewer) view.imageRotation = extraRotation
                     else { view.cameraSensorOrientation = state.rotation; view.imageRotation = 0 }
                     view.updateTransform()
                     if (viewer) session.viewerSurface(if (life.isAtLeast(Lifecycle.State.RESUMED)) output else null)

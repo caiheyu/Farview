@@ -12,7 +12,7 @@ class VideoTexture(context: Context, private val available: (SurfaceTexture) -> 
     private val destroyed: () -> Unit) : TextureView(context), TextureView.SurfaceTextureListener {
     var imageWidth = 1280
     var imageHeight = 720
-    var imageRotation = 90
+    var imageRotation = 0
     var cameraSensorOrientation: Int? = null
     init { surfaceTextureListener = this; isOpaque = true }
     fun updateTransform() {

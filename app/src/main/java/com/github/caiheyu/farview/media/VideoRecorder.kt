@@ -67,7 +67,8 @@ class VideoRecorder(private val context: Context, private val onStatus: (Boolean
                 val name = "Farview_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}_$segment"
                 output = File(directory, "$name.partial")
                 muxer = MediaMuxer(output!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).apply {
-                    setOrientationHint(f.rotation)
+                    // The received stream is already upright (EncoderBridge applied the camera's
+                    // texture matrix), so no orientation hint: one would rotate every clip.
                     track = addTrack(f.mediaFormat()); start()
                 }
                 firstPts = frame.ptsUs; lastPts = -1; samples = 0

@@ -50,7 +50,8 @@ class FarviewIntegrationTest {
         for (command in listOf("input keyevent 224", "wm dismiss-keyguard")) {
             automation.executeShellCommand(command).use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
         }
-        for (permission in listOf("android.permission.CAMERA", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE")) {
+        for (permission in listOf("android.permission.CAMERA", "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.POST_NOTIFICATIONS")) {
             automation.executeShellCommand("pm grant ${app.packageName} $permission").use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
         }
     }
@@ -171,6 +172,23 @@ class FarviewIntegrationTest {
         compose.runOnUiThread { compose.activity.setContent { FarviewTheme { FarviewScreen(receiver, {}, receiver::toggleRecording) } } }
         compose.waitUntil(10000) { receiver.decoder.lastRenderedAt > 0 }
         screenshot("viewer")
+        var viewerPreview: VideoTexture? = null
+        compose.waitUntil(5000) {
+            compose.runOnUiThread { viewerPreview = findVideoTexture(compose.activity.window.decorView) }
+            viewerPreview != null
+        }
+        compose.runOnUiThread {
+            // The encoded stream is already upright (EncoderBridge applies the camera's
+            // texture matrix), so the viewer must not layer the stream rotation on top.
+            val corners = floatArrayOf(0f, 0f, viewerPreview!!.width.toFloat(), 0f, 0f, viewerPreview!!.height.toFloat())
+            viewerPreview!!.getTransform(Matrix()).mapPoints(corners)
+            assertTrue(corners[2] > corners[0])
+            assertEquals(corners[1], corners[3], .01f)
+            assertEquals(corners[0], corners[4], .01f)
+            assertTrue(corners[5] > corners[1])
+            val expectedAspect = viewerPreview!!.imageWidth.toFloat() / viewerPreview!!.imageHeight
+            assertEquals(expectedAspect, (corners[2] - corners[0]) / (corners[5] - corners[1]), .01f)
+        }
         compose.onNodeWithText("旋转").performClick()
         compose.onNodeWithText("全屏").performClick()
         compose.onNodeWithText("退出全屏", substring = true).assertIsDisplayed()
@@ -273,6 +291,8 @@ class FarviewIntegrationTest {
             val format = extractor.getTrackFormat(0)
             assertEquals("video/avc", format.getString(MediaFormat.KEY_MIME))
             assertTrue(format.getLong(MediaFormat.KEY_DURATION) > 500000)
+            if (format.containsKey(MediaFormat.KEY_ROTATION))
+                assertEquals("Recorded clips stay upright: the stream rotation is already baked in", 0, format.getInteger(MediaFormat.KEY_ROTATION))
             extractor.selectTrack(0)
             codec = MediaCodec.createDecoderByType("video/avc").apply { configure(format, null, null, 0); start() }
             val info = MediaCodec.BufferInfo()
