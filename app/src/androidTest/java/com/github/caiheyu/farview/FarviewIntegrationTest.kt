@@ -212,9 +212,12 @@ class FarviewIntegrationTest {
             receiver.command("quality", "1080")
             compose.waitUntil(15000) { receiver.state.value.quality == 1080 && receiver.state.value.savedClips >= 1 }
         } else {
-            // Restart the actual camera stream to exercise format generations even on a one-lens emulator.
-            receiver.command("lens", lens.id)
+            // Prefer the front lens: this exercises format generations plus the mirrored front
+            // stream; devices without a usable front camera fall back to restarting the same lens.
+            val target = receiver.state.value.lenses.firstOrNull { it.front } ?: lens
+            receiver.command("lens", target.id)
             compose.waitUntil(15000) { receiver.state.value.savedClips >= 1 && !receiver.state.value.pendingCommand }
+            assertEquals(target.id, receiver.state.value.lensId)
         }
         assertTrue(receiver.state.value.recording)
         assertPlayableSilentVideo(app, receiver.state.value.lastClip!!)

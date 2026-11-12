@@ -21,12 +21,14 @@ import org.json.JSONObject
 import kotlin.math.abs
 
 data class Lens(val id: String, val name: String, val equivalent: Float, val zoomMin: Float,
-    val zoomMax: Float, val torch: Boolean, val qualities: List<Int>) {
+    val zoomMax: Float, val torch: Boolean, val front: Boolean, val qualities: List<Int>) {
     fun json() = JSONObject().put("id", id).put("name", name).put("equivalent", equivalent)
-        .put("min", zoomMin.toDouble()).put("max", zoomMax.toDouble()).put("torch", torch).put("qualities", JSONArray(qualities))
+        .put("min", zoomMin.toDouble()).put("max", zoomMax.toDouble()).put("torch", torch)
+        .put("front", front).put("qualities", JSONArray(qualities))
     companion object {
+        // Older viewers send no "front" flag; every lens they list is back-facing.
         fun parse(j: JSONObject) = Lens(j.getString("id"), j.getString("name"), j.getDouble("equivalent").toFloat(),
-            j.getDouble("min").toFloat(), j.getDouble("max").toFloat(), j.getBoolean("torch"),
+            j.getDouble("min").toFloat(), j.getDouble("max").toFloat(), j.getBoolean("torch"), j.optBoolean("front"),
             j.getJSONArray("qualities").let { a -> (0 until a.length()).map { a.getInt(it) } })
     }
 }
@@ -43,7 +45,9 @@ class CameraEngine(context: Context, private val onFormat: (VideoFormat) -> Unit
     private val codecHandler = Handler(codecWorker.looper)
     val lenses: List<Lens> = manager.cameraIdList.mapNotNull { id ->
         val c = manager.getCameraCharacteristics(id)
-        if (c[CameraCharacteristics.LENS_FACING] != CameraCharacteristics.LENS_FACING_BACK) return@mapNotNull null
+        val facing = c[CameraCharacteristics.LENS_FACING]
+        if (facing != CameraCharacteristics.LENS_FACING_BACK && facing != CameraCharacteristics.LENS_FACING_FRONT) return@mapNotNull null
+        val front = facing == CameraCharacteristics.LENS_FACING_FRONT
         val focal = c[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]?.firstOrNull() ?: 4f
         val physical = c[CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE]?.width ?: 5.7f
         val equivalent = focal * 36f / physical
@@ -51,12 +55,20 @@ class CameraEngine(context: Context, private val onFormat: (VideoFormat) -> Unit
         val sizes = c[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP]?.getOutputSizes(MediaCodec::class.java)?.toList().orEmpty()
         val qualities = listOf(720, 1080).filter { h -> sizes.any { it.width == h * 16 / 9 && it.height == h } }
         if (qualities.isEmpty()) return@mapNotNull null
-        Lens(id, if (equivalent < 20) "超广角" else if (equivalent > 40) "长焦" else "主摄", equivalent,
+        Lens(id, when {
+            // Front streams are mirrored for the operator; the encoder flips them back so
+            // the viewer sees the scene the way people facing the camera see it.
+            front -> "前置"
+            equivalent < 20 -> "超广角"
+            equivalent > 40 -> "长焦"
+            else -> "主摄"
+        }, equivalent,
             ratio?.lower ?: 1f, ratio?.upper ?: c[CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM] ?: 1f,
-            c[CameraCharacteristics.FLASH_INFO_AVAILABLE] == true, qualities)
-    }.sortedBy { it.equivalent }
+            c[CameraCharacteristics.FLASH_INFO_AVAILABLE] == true, front, qualities)
+    }.sortedWith(compareBy({ it.front }, { it.equivalent }))
 
-    @Volatile var lens: Lens = lenses.minByOrNull { abs(it.equivalent - 26) } ?: error("没有可用于实时视频的后置相机")
+    @Volatile var lens: Lens = lenses.filterNot(Lens::front).minByOrNull { abs(it.equivalent - 26) }
+        ?: error("没有可用于实时视频的相机镜头")
         private set
     @Volatile var zoom = 1f
         private set
@@ -126,7 +138,9 @@ class CameraEngine(context: Context, private val onFormat: (VideoFormat) -> Unit
         val gen = ++generation
         releaseCapture()
         try {
-            val rotation = manager.getCameraCharacteristics(lens.id)[CameraCharacteristics.SENSOR_ORIENTATION] ?: 90
+            val characteristics = manager.getCameraCharacteristics(lens.id)
+            val rotation = characteristics[CameraCharacteristics.SENSOR_ORIENTATION] ?: 90
+            val front = characteristics[CameraCharacteristics.LENS_FACING] == CameraCharacteristics.LENS_FACING_FRONT
             val codec = MediaCodec.createEncoderByType("video/avc")
             encoder = codec
             codec.setCallback(object : MediaCodec.Callback() {
@@ -157,7 +171,7 @@ class CameraEngine(context: Context, private val onFormat: (VideoFormat) -> Unit
             }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoderSurface = codec.createInputSurface()
             codec.start()
-            bridge = EncoderBridge(quality * 16 / 9, quality, encoderSurface!!, handler, onError)
+            bridge = EncoderBridge(quality * 16 / 9, quality, encoderSurface!!, handler, onError, front)
             previewTexture?.setDefaultBufferSize(quality * 16 / 9, quality)
             manager.openCamera(lens.id, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {

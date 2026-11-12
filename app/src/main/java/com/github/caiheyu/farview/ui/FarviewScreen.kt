@@ -98,7 +98,7 @@ fun FarviewScreen(session: SessionManager, chooseRole: (Role) -> Unit, record: (
                     }
                     Stage.PREPARING -> {
                         AppHeader("准备拍摄", "仅本地", back = { endConfirm = true }, about = { panel = "about" })
-                        CenterStatus("正在准备后置相机", "请先将两台手机连接同一热点")
+                        CenterStatus("正在准备相机", "请先将两台手机连接同一热点")
                     }
                     Stage.WAITING -> {
                         AppHeader("等待观看端", "本地配对", back = { endConfirm = true }, about = { panel = "about" })
@@ -344,7 +344,7 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
                     TextButton(onClick = end, modifier = Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 62.dp)) { Text("结束连接", color = Paper, fontSize = 12.sp) }
                 }
             }
-            if (!full && viewer) ViewerControls(state, session, rotate, quality, toggleFull, record) {
+            if (!full && viewer) ViewerControls(state, session, rotate, quality, toggleFull, record, end) {
                 val intent = state.lastClip?.let { Intent(Intent.ACTION_VIEW).setDataAndType(it, "video/mp4").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
                     ?: Intent(Intent.ACTION_VIEW).setDataAndType(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "vnd.android.cursor.dir/video")
                 runCatching { context.startActivity(intent) }.onFailure { session.message("未找到可打开录像的相册应用") }
@@ -353,16 +353,17 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
                 Text(if (connected) "画面正在传送" else "保持拍摄，等待重连", fontSize = 20.sp)
                 Text("把手机放好，在另一台手机上查看与调整。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp))
                 Row(Modifier.fillMaxWidth().padding(vertical = 23.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    Summary("后置镜头", state.lens?.name ?: "主摄"); Summary("传输画质", "${state.quality}p"); Summary("音频", "不传声音")
+                    Summary("镜头", state.lens?.name ?: "主摄"); Summary("传输画质", "${state.quality}p"); Summary("音频", "不传声音")
                 }
                 MainButton("黑屏继续拍摄", black, Glyph.MOON)
-                Text("系统持续显示拍摄状态通知 · 真正熄屏请按电源键", fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 14.dp))
+                TextButton(onClick = end, modifier = Modifier.padding(top = 2.dp)) { Text("结束连接", color = Color(0xFFAA5A52), fontSize = 12.sp) }
+                Text("系统持续显示拍摄状态通知 · 真正熄屏请按电源键", fontSize = 10.sp, color = Muted, modifier = Modifier.padding(top = 10.dp))
             }
         }
     }
 }
 
-@Composable private fun ViewerControls(state: SessionState, session: SessionManager, rotate: () -> Unit, quality: () -> Unit, full: () -> Unit, record: () -> Unit, gallery: () -> Unit) {
+@Composable private fun ViewerControls(state: SessionState, session: SessionManager, rotate: () -> Unit, quality: () -> Unit, full: () -> Unit, record: () -> Unit, end: () -> Unit, gallery: () -> Unit) {
     val enabled = state.stage == Stage.CONNECTED
     val lens = state.lens
     var zoom by remember(state.lensId) { mutableFloatStateOf(state.zoom) }
@@ -370,7 +371,7 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
     LaunchedEffect(state.zoom, state.pendingCommand) { if (!state.pendingCommand) zoom = state.zoom }
     Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(top = 17.dp, bottom = 16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("后置镜头", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(end = 14.dp))
+            Text("镜头", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(end = 14.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.lenses.forEach { l ->
                     val selected = l.id == state.lensId
@@ -416,6 +417,9 @@ private fun copyConnectionDiagnostics(context: Context, session: SessionManager)
             Text("保存到本机相册 · 无声音", color = Muted, fontSize = 10.sp, modifier = Modifier.weight(1f))
             TextButton(onClick = gallery) { FarIcon(Glyph.GALLERY, modifier = Modifier.size(15.dp), tint = Sage); Text(" 相册${if (state.savedClips > 0) " (${state.savedClips})" else ""}", color = Sage, fontSize = 11.sp) }
         }
+        // The header close icon also ends the session, but a labelled button keeps the
+        // action discoverable without entering fullscreen or reading icon semantics.
+        TextButton(onClick = end, modifier = Modifier.padding(top = 2.dp)) { Text("结束连接", color = Color(0xFFAA5A52), fontSize = 12.sp) }
     }
 }
 
